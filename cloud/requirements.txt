@@ -1,0 +1,6 @@
+azure-functions
+pandas
+numpy
+boto3
+azure-storage-blob
+azure-communication-email
