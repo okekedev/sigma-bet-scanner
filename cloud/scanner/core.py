@@ -243,6 +243,68 @@ def render_reversion_email(fires, states):
             f"<tr><th>ETF</th><th>theme</th><th>dev vs 5d MA</th><th>buy threshold</th>"
             f"<th>signal</th><th>100d trend</th></tr>{body}</table>")
 
+def _sum_ret(df):
+    if not len(df) or "exit_ret" not in df.columns: return 0.0
+    return float(df["exit_ret"].fillna(0).sum()) * LOT
+
+def render_daily_brief(rev_states, log, latest_close, day):
+    """One combined morning email covering BOTH strategies: sigma-options status
+    + the full ETF reversion state table. Sent every nightly run (deduped/day)."""
+    TD = "padding:5px 8px;border-top:1px solid #eee"
+    TDR = TD + ";text-align:right"
+    TH = "text-align:left;color:#888;font-weight:600;font-size:12px;padding:4px 8px"
+    open_all = log[log["status"] == "open"] if len(log) else log
+    def held(d0):
+        return int(np.busday_count(np.datetime64(pd.Timestamp(d0).date()),
+                                   np.datetime64(pd.Timestamp(day).date())))
+    def pos_rows(rows, hold_d, price_of):
+        out = ""
+        for _, p in (rows.iterrows() if len(rows) else []):
+            cur = price_of(p["und"]); ret = (cur / p["entry"] - 1) if pd.notna(cur) else np.nan
+            out += (f"<tr><td style='{TD}'><b>{p['und']}</b></td><td style='{TD}'>{held(p['date'])}/{hold_d}d</td>"
+                    f"<td style='{TD}'>${p['entry']:.2f}</td>"
+                    f"<td style='{TDR}'>{('%+.1f%%' % (ret*100)) if pd.notna(ret) else '—'}</td></tr>")
+        return out or f"<tr><td colspan=4 style='{TD};color:#888'>no open positions</td></tr>"
+
+    # ---- ETF reversion ----
+    def flag(s): return "🟢 BUY" if s["buy"] else ("· below" if s["dev5"] < 0 else "above")
+    erows = "".join(
+        f"<tr><td style='{TD}'><b>{s['tk']}</b></td><td style='{TD}'>{s['theme']}</td>"
+        f"<td style='{TDR}'>{s['dev5']:+.2f}%</td><td style='{TDR}'>{s['thr']:.0f}%</td>"
+        f"<td style='{TD}'>{flag(s)}</td><td style='{TD}'>{'↑ up' if s['uptrend'] else '↓/flat'}</td></tr>"
+        for s in sorted(rev_states, key=lambda x: x["dev5"]))
+    revmap = {s["tk"]: s["close"] for s in rev_states}
+    rev_open = open_all[open_all["mode"] == "reversion"] if len(open_all) else open_all
+    rrows = pos_rows(rev_open, REV_HOLD, lambda t: revmap.get(t, np.nan))
+    rev_pl = _sum_ret(log[(log["status"] == "closed") & (log["mode"] == "reversion")]) if len(log) else 0
+
+    # ---- sigma options ----
+    sig_open = open_all[~open_all["mode"].isin(["shadow", "reversion"])] if len(open_all) else open_all
+    srows = pos_rows(sig_open, HOLD_DAYS, lambda t: latest_close.get(t, np.nan))
+    sig_pl = _sum_ret(log[(log["status"] == "closed") & (~log["mode"].isin(["shadow", "reversion"]))]) if len(log) else 0
+    shadow_open = len(open_all[open_all["mode"] == "shadow"]) if len(open_all) else 0
+
+    buys = [s["tk"] for s in rev_states if s["buy"]]
+    headline = ("🟢 ETF buy: " + ", ".join(buys)) if buys else "No new ETF buys today"
+    tbl = "border-collapse:collapse;width:100%;font-size:14px"
+    return (f"<div style='font-family:-apple-system,sans-serif;max-width:560px;margin:auto;color:#222'>"
+            f"<h2 style='margin:0 0 2px'>📊 Daily brief · {day}</h2>"
+            f"<div style='color:#238636;font-weight:700;margin-bottom:16px'>{headline}</div>"
+            f"<h3 style='margin:14px 0 4px'>ETF reversion</h3>"
+            f"<table style='{tbl}'><tr><th style='{TH}'>ETF</th><th style='{TH}'>theme</th>"
+            f"<th style='{TH};text-align:right'>dev vs 5d</th><th style='{TH};text-align:right'>buy&lt;</th>"
+            f"<th style='{TH}'>signal</th><th style='{TH}'>trend</th></tr>{erows}</table>"
+            f"<div style='font-size:12px;color:#888;margin:8px 0 2px'>Open reversion positions · "
+            f"closed P&amp;L ${rev_pl:+,.0f}</div>"
+            f"<table style='{tbl}'>{rrows}</table>"
+            f"<h3 style='margin:20px 0 4px'>Sigma options</h3>"
+            f"<div style='font-size:12px;color:#888;margin-bottom:2px'>Open positions · shadow open {shadow_open} · "
+            f"closed P&amp;L ${sig_pl:+,.0f}</div>"
+            f"<table style='{tbl}'>{srows}</table>"
+            f"<div style='font-size:11px;color:#aaa;margin-top:18px'>Reversion: buy fresh dip below 5d MA "
+            f"(GLD/SLV −2%, URA/USO/XBI −3%), hold {REV_HOLD}d. Event alerts (buy-at-close, 🎯 aligned, exits) "
+            f"arrive intraday as they happen.</div></div>")
+
 # ---------------- intraday reversion ALIGNMENT (entry trigger) ----------------
 def fetch_etf_15m(tk, days=40):
     frm = (now_et() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -666,19 +728,18 @@ def run_eod():
         log_shadow(f[base_gate & (f["sh10"] >= 0.10) & (f["n310"] >= FIRE_NOTIONAL) & f["put_absent"]],
                    "v5.2 (sh10 + $250k + put-ABSENT)")
 
-    # ETF mean-reversion scan (independent of the sigma flow)
+    # ETF mean-reversion scan + combined daily brief (independent of sigma flow)
     try:
         log, rev_fires, rev_states = scan_reversion(log)
+        last_day = str(closes["date"].max())[:10]
+        latest_close = closes.sort_values("date").groupby("und").tail(1).set_index("und")["close"]
+        # one combined morning email every night, deduped per day
+        alert_once(f"dailybrief:{last_day}", f"📊 Daily brief · {last_day}",
+                   render_daily_brief(rev_states, log, latest_close, last_day))
         if rev_fires:
-            names = ",".join(f["tk"] for f in rev_fires)
-            alert_once(f"revbuy:{names}:{str(closes['date'].max())[:10]}",
-                       f"🟢 ETF reversion BUY: {names}",
-                       render_reversion_email(rev_fires, rev_states))
-            msgs.append(f"reversion buy: {names}")
-        elif rev_states:
-            msgs.append("reversion: no new buys")
+            msgs.append("reversion buy: " + ",".join(f["tk"] for f in rev_fires))
     except Exception as e:
-        msgs.append(f"reversion scan error: {e}")
+        msgs.append(f"reversion/brief error: {e}")
 
     write_csv_blob("closes.csv", closes)
     if sb is not None: write_csv_blob("sigma_bets_daily.csv", sb)
