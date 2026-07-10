@@ -50,6 +50,7 @@ REV_UNIVERSE = {  # ticker: (theme, entry_dev_pct) — threshold ~ sized to each
 }
 REV_FAST = 5      # reversion anchor MA
 REV_HOLD = 10     # validated best simple exit (never sell in first 2 days)
+DASH_URL = "https://stoptionsscan.z13.web.core.windows.net/"
 
 # ---------------- blob state ----------------
 def _svc():
@@ -251,62 +252,46 @@ def _sum_ret(df):
     return float(df["exit_ret"].fillna(0).sum()) * LOT
 
 def render_daily_brief(rev_states, log, latest_close, day):
-    """One combined morning email covering BOTH strategies: sigma-options status
-    + the full ETF reversion state table. Sent every nightly run (deduped/day)."""
-    TD = "padding:5px 8px;border-top:1px solid #eee"
-    TDR = TD + ";text-align:right"
-    TH = "text-align:left;color:#888;font-weight:600;font-size:12px;padding:4px 8px"
+    """Concise ACTIONABLE snapshot: what to do today, a short watch list, open
+    positions in one line, and a link to the live chart. Sent nightly (deduped/day)."""
     open_all = log[log["status"] == "open"] if len(log) else log
     def held(d0):
         return int(np.busday_count(np.datetime64(pd.Timestamp(d0).date()),
                                    np.datetime64(pd.Timestamp(day).date())))
-    def pos_rows(rows, hold_d, price_of):
-        out = ""
-        for _, p in (rows.iterrows() if len(rows) else []):
-            cur = price_of(p["und"]); ret = (cur / p["entry"] - 1) if pd.notna(cur) else np.nan
-            out += (f"<tr><td style='{TD}'><b>{p['und']}</b></td><td style='{TD}'>{held(p['date'])}/{hold_d}d</td>"
-                    f"<td style='{TD}'>${p['entry']:.2f}</td>"
-                    f"<td style='{TDR}'>{('%+.1f%%' % (ret*100)) if pd.notna(ret) else '—'}</td></tr>")
-        return out or f"<tr><td colspan=4 style='{TD};color:#888'>no open positions</td></tr>"
-
-    # ---- ETF reversion ----
-    def flag(s): return "🟢 BUY" if s["buy"] else ("· below" if s["dev5"] < 0 else "above")
-    erows = "".join(
-        f"<tr><td style='{TD}'><b>{s['tk']}</b></td><td style='{TD}'>{s['theme']}</td>"
-        f"<td style='{TDR}'>{s['dev5']:+.2f}%</td><td style='{TDR}'>{s['thr']:.0f}%</td>"
-        f"<td style='{TD}'>{flag(s)}</td><td style='{TD}'>{'↑ up' if s['uptrend'] else '↓/flat'}</td></tr>"
-        for s in sorted(rev_states, key=lambda x: x["dev5"]))
-    revmap = {s["tk"]: s["close"] for s in rev_states}
+    buys = sorted([s for s in rev_states if s["buy"]], key=lambda x: x["dev5"])
+    watch = sorted([s for s in rev_states if not s["buy"] and s["dev5"] < 0],
+                   key=lambda x: x["dev5"])[:3]
     rev_open = open_all[open_all["mode"] == "reversion"] if len(open_all) else open_all
-    rrows = pos_rows(rev_open, REV_HOLD, lambda t: revmap.get(t, np.nan))
-    rev_pl = _sum_ret(log[(log["status"] == "closed") & (log["mode"] == "reversion")]) if len(log) else 0
-
-    # ---- sigma options ----
+    exits = [p["und"] for _, p in (rev_open.iterrows() if len(rev_open) else [])
+             if held(p["date"]) >= REV_HOLD]
     sig_open = open_all[~open_all["mode"].isin(["shadow", "reversion"])] if len(open_all) else open_all
-    srows = pos_rows(sig_open, HOLD_DAYS, lambda t: latest_close.get(t, np.nan))
-    sig_pl = _sum_ret(log[(log["status"] == "closed") & (~log["mode"].isin(["shadow", "reversion"]))]) if len(log) else 0
-    shadow_open = len(open_all[open_all["mode"] == "shadow"]) if len(open_all) else 0
 
-    buys = [s["tk"] for s in rev_states if s["buy"]]
-    headline = ("🟢 ETF buy: " + ", ".join(buys)) if buys else "No new ETF buys today"
-    tbl = "border-collapse:collapse;width:100%;font-size:14px"
-    return (f"<div style='font-family:-apple-system,sans-serif;max-width:560px;margin:auto;color:#222'>"
-            f"<h2 style='margin:0 0 2px'>📊 Daily brief · {day}</h2>"
-            f"<div style='color:#238636;font-weight:700;margin-bottom:16px'>{headline}</div>"
-            f"<h3 style='margin:14px 0 4px'>ETF reversion</h3>"
-            f"<table style='{tbl}'><tr><th style='{TH}'>ETF</th><th style='{TH}'>theme</th>"
-            f"<th style='{TH};text-align:right'>dev vs 5d</th><th style='{TH};text-align:right'>buy&lt;</th>"
-            f"<th style='{TH}'>signal</th><th style='{TH}'>trend</th></tr>{erows}</table>"
-            f"<div style='font-size:12px;color:#888;margin:8px 0 2px'>Open reversion positions · "
-            f"closed P&amp;L ${rev_pl:+,.0f}</div>"
-            f"<table style='{tbl}'>{rrows}</table>"
-            f"<h3 style='margin:20px 0 4px'>Sigma options</h3>"
-            f"<div style='font-size:12px;color:#888;margin-bottom:2px'>Open positions · shadow open {shadow_open} · "
-            f"closed P&amp;L ${sig_pl:+,.0f}</div>"
-            f"<table style='{tbl}'>{srows}</table>"
-            f"<div style='font-size:11px;color:#aaa;margin-top:18px'>Reversion: buy fresh dip below 5d MA "
-            f"(GLD/SLV −2%, URA/USO/XBI −3%), hold {REV_HOLD}d. Event alerts (buy-at-close, 🎯 aligned, exits) "
-            f"arrive intraday as they happen.</div></div>")
+    todo = ""
+    for s in buys:
+        todo += (f"<div style='color:#238636;font-weight:700;font-size:16px;margin:3px 0'>🟢 BUY "
+                 f"{s['tk']} &nbsp;${s['close']:.2f} &nbsp;<span style='font-weight:400;color:#777'>"
+                 f"({s['dev5']:+.1f}% vs 5d)</span></div>")
+    for tk in exits:
+        todo += (f"<div style='color:#b9860b;font-weight:700;font-size:16px;margin:3px 0'>⏰ SELL "
+                 f"{tk} &nbsp;<span style='font-weight:400;color:#777'>day-{REV_HOLD} exit</span></div>")
+    if not todo:
+        todo = "<div style='color:#666;font-size:15px'>✓ No action needed today</div>"
+    watch_html = ""
+    if watch:
+        chips = " &nbsp;·&nbsp; ".join(f"<b>{s['tk']}</b> {s['dev5']:+.1f}%" for s in watch)
+        watch_html = (f"<div style='font-size:12.5px;color:#888;margin-top:14px'>"
+                      f"Watching (nearing buy): {chips}</div>")
+    return (f"<div style='font-family:-apple-system,sans-serif;max-width:440px;margin:auto;color:#222'>"
+            f"<div style='font-size:13px;color:#999'>📊 {day}</div>"
+            f"<h2 style='margin:2px 0 12px'>Today’s brief</h2>"
+            f"{todo}{watch_html}"
+            f"<div style='font-size:12.5px;color:#888;margin-top:6px'>"
+            f"Open: {len(rev_open)} ETF · {len(sig_open)} options</div>"
+            f"<a href='{DASH_URL}' style='display:inline-block;margin-top:16px;background:#238636;"
+            f"color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:9px 16px;"
+            f"border-radius:8px'>📈 View live trends &amp; chart →</a>"
+            f"<div style='font-size:11px;color:#aaa;margin-top:14px'>Buy fresh dip below 5-day MA, "
+            f"hold {REV_HOLD}d. Full 10-ETF chart at the link.</div></div>")
 
 # ---------------- intraday reversion ALIGNMENT (entry trigger) ----------------
 def fetch_etf_15m(tk, days=40):
@@ -321,21 +306,74 @@ def fetch_etf_15m(tk, days=40):
     df = df[(df["hr"] >= 14) & (df["hr"] <= 20)]          # core RTH, both DST regimes
     return df[["ts", "close"]].sort_values("ts").reset_index(drop=True)
 
-def scan_alignment():
-    """Intraday entry trigger. For each ETF that is ALSO in its daily buy zone
-    (daily dev <= threshold), alert when the 1h/5h/5d timeframes all sit below
-    their means at once (validated: this times the entry, ~30% better 1-2d than
-    an unaligned entry). Deduped once per ETF per day. Independent of sigma flow."""
-    hits = []
-    for tk, (theme, dev_thr) in REV_UNIVERSE.items():
-        d = fetch_etf_daily(tk, days=60)
-        if d is None or len(d) < REV_FAST + 1:
+def reversion_board():
+    """Fetch each ETF's daily bars ONCE and compute its state + 30-day deviation
+    trajectory. Single source for the intraday buy/align alerts AND the dashboard
+    chart, so we don't re-fetch the same bars per feature. Sorted most-oversold first."""
+    board = []
+    for tk, (theme, thr) in REV_UNIVERSE.items():
+        d = fetch_etf_daily(tk, days=120)
+        if d is None or len(d) < REV_FAST + 2:
             continue
         c = d["close"]; ma5 = c.rolling(REV_FAST, min_periods=REV_FAST).mean()
-        daily_dev = (c.iloc[-1] - ma5.iloc[-1]) / ma5.iloc[-1] * 100.0
-        if pd.isna(daily_dev) or daily_dev > dev_thr:     # not oversold on the daily -> skip
+        dev = (c - ma5) / ma5 * 100.0
+        cur, prev = dev.iloc[-1], dev.iloc[-2]
+        if pd.isna(cur):
             continue
-        m = fetch_etf_15m(tk)
+        if cur <= thr:                          state = "buy"
+        elif cur < 0 and cur > dev.iloc[-3]:    state = "turning"   # up over last 2 sessions
+        elif cur < 0:                           state = "below"
+        else:                                   state = "above"
+        board.append(dict(tk=tk, theme=theme, thr=thr, price=float(c.iloc[-1]),
+                          cur=float(cur), prev=float(prev), state=state,
+                          dev30=[round(float(x), 2) for x in dev.dropna().iloc[-30:]]))
+    board.sort(key=lambda b: b["cur"])
+    return board
+
+STATE_COLOR = {"buy": "#3fb950", "turning": "#e3b341", "below": "#58a6ff", "above": "#8b949e"}
+STATE_LABEL = {"buy": "🟢 buy zone", "turning": "↑ turning up", "below": "· below MA", "above": "above MA"}
+
+def _spark_svg(dev30, thr, color, W=200, H=44):
+    if not dev30:
+        return ""
+    ymin, ymax = -10.0, 7.0
+    xf = lambda i: 4 + i * (W - 8) / max(1, len(dev30) - 1)
+    yf = lambda v: round(H - (max(ymin, min(ymax, v)) - ymin) / (ymax - ymin) * H, 1)
+    path = " ".join(("L" if i else "M") + f"{xf(i):.1f} {yf(v):.1f}" for i, v in enumerate(dev30))
+    return (f"<svg viewBox='0 0 {W} {H}' preserveAspectRatio='none' style='width:100%;height:{H}px;margin-top:4px'>"
+            f"<line x1='0' y1='{yf(0)}' x2='{W}' y2='{yf(0)}' stroke='#484f58' stroke-width='1'/>"
+            f"<line x1='0' y1='{yf(thr)}' x2='{W}' y2='{yf(thr)}' stroke='#f85149' stroke-width='1' stroke-dasharray='3 3' opacity='.5'/>"
+            f"<path d='{path}' fill='none' stroke='{color}' stroke-width='2' stroke-linejoin='round'/>"
+            f"<circle cx='{xf(len(dev30)-1):.1f}' cy='{yf(dev30[-1])}' r='3.5' fill='{color}'/></svg>")
+
+def rev_chart_html(board):
+    """Server-rendered inline-SVG sparkline grid for the dashboard (no JS needed)."""
+    if not board:
+        return ""
+    cells = ""
+    for b in board:
+        col = STATE_COLOR[b["state"]]
+        cells += (f"<div style='background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:9px 10px'>"
+                  f"<div style='display:flex;justify-content:space-between;align-items:baseline'>"
+                  f"<b>{b['tk']}</b><span style='color:{col};font-weight:700;font-variant-numeric:tabular-nums'>"
+                  f"{b['cur']:+.2f}%</span></div>"
+                  f"<div style='font-size:10px;color:{col}'>{STATE_LABEL[b['state']]}</div>"
+                  f"{_spark_svg(b['dev30'], b['thr'], col)}</div>")
+    return ("<details open><summary>ETF reversion — dev vs 5-day MA (30d) "
+            f"<span class='count'>{len(board)}</span></summary>"
+            "<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));"
+            f"gap:8px;padding:12px'>{cells}</div></details>")
+
+def scan_alignment(board):
+    """Intraday entry trigger. For each ETF in its daily buy zone, alert when the
+    1h/5h/5d timeframes all sit below their means at once (validated: times the
+    entry ~30% better 1-2d). Deduped once per ETF per day. Uses `board` for the
+    daily context (no daily re-fetch); only pulls 15-min bars for oversold names."""
+    hits = []
+    for b in board:
+        if b["cur"] > b["thr"]:                           # not oversold on the daily -> skip
+            continue
+        m = fetch_etf_15m(b["tk"])
         if m is None or len(m) < 130:
             continue
         cc = m["close"]
@@ -344,7 +382,7 @@ def scan_alignment():
             return (cc.iloc[-1] - ma) / ma * 100.0 if pd.notna(ma) else np.nan
         d1h, d5h, d5d = dv(4), dv(20), dv(130)
         if pd.notna(d5d) and d1h < 0 and d5h < 0 and d5d < 0:   # 3/3 aligned below
-            hits.append(dict(tk=tk, theme=theme, daily_dev=daily_dev, d1h=d1h,
+            hits.append(dict(tk=b["tk"], theme=b["theme"], daily_dev=b["cur"], d1h=d1h,
                              d5h=d5h, d5d=d5d, price=cc.iloc[-1]))
     for h in hits:
         alert_once(f"revalign:{h['tk']}:{now_et().strftime('%Y-%m-%d')}",
@@ -357,24 +395,15 @@ def scan_alignment():
             f"1h {h['d1h']:+.2f}% · 5h {h['d5h']:+.2f}% · 5d {h['d5d']:+.2f}%</div></div>")
     return hits
 
-def scan_reversion_buyzone():
+def scan_reversion_buyzone(board):
     """Late-day (>=3pm ET) buy-at-close alert. The backtest enters at the CLOSE of
     the dip day, so this fires the daily BUY on the last intraday cycle -- in time
-    to act -- rather than waiting for the 5a nightly job (a day late). Read-only:
-    it does NOT open positions; the nightly job logs the entry on the settled
-    close. Deduped per ETF per day."""
+    to act -- rather than waiting for the 5a nightly job (a day late). Read-only;
+    the nightly job logs the entry on the settled close. Uses `board`. Deduped/day."""
     if now_et().hour < 15:            # only near the close (~3:45p ET cycle)
         return []
-    hits = []
-    for tk, (theme, thr) in REV_UNIVERSE.items():
-        d = fetch_etf_daily(tk, days=30)
-        if d is None or len(d) < REV_FAST + 1:
-            continue
-        c = d["close"]; ma5 = c.rolling(REV_FAST, min_periods=REV_FAST).mean()
-        dev = (c - ma5) / ma5 * 100.0
-        cur, prev = dev.iloc[-1], dev.iloc[-2]
-        if pd.notna(cur) and pd.notna(prev) and cur <= thr and prev > thr:
-            hits.append(dict(tk=tk, theme=theme, dev=cur, price=c.iloc[-1], thr=thr))
+    hits = [dict(tk=b["tk"], theme=b["theme"], dev=b["cur"], price=b["price"], thr=b["thr"])
+            for b in board if b["cur"] <= b["thr"] and b["prev"] > b["thr"]]
     for h in hits:
         alert_once(f"revbuyclose:{h['tk']}:{now_et().strftime('%Y-%m-%d')}",
             f"🟢 {h['tk']} buy at close ({h['dev']:+.1f}% vs 5d MA)",
@@ -389,8 +418,9 @@ def scan_reversion_buyzone():
 
 # ---------------- dashboard (same layout as local) ----------------
 def render_dashboard(ts, fires, watch, positions, eod_date, closed, signals, shadow_closed,
-                     shadow_open_n, rev_open=None, rev_closed=None):
+                     shadow_open_n, rev_open=None, rev_closed=None, board=None):
     rev_open = rev_open or []; rev_closed = rev_closed or []
+    rev_chart = rev_chart_html(board or [])
     n_closed = len(closed)
     wins = sum(1 for c in closed if c["ret"] > 0)
     total_pl = sum(c["ret"] for c in closed) * LOT
@@ -459,6 +489,7 @@ def render_dashboard(ts, fires, watch, positions, eod_date, closed, signals, sha
 <details {"open" if watch else ""}><summary>Watchlist <span class="count">{len(watch)}</span></summary><table>{watch_rows}</table></details>
 <details><summary>History <span class="count">{n_closed}</span></summary><table>{hist(closed)}</table></details>
 <details><summary>Shadow v5.0 · {sh_wins}/{len(shadow_closed)} wins · ${sh_pl:+,.0f} <span class="count">{len(shadow_closed)}</span></summary><table>{hist(shadow_closed)}</table></details>
+{rev_chart}
 <details {"open" if rev_open else ""}><summary>ETF reversion · open {len(rev_open)} · {rev_wins}/{len(rev_closed)} wins · ${rev_pl:+,.0f} <span class="count">{len(rev_closed)}</span></summary><table>{rev_open_rows}</table><table>{hist(rev_closed)}</table></details>
 </body></html>"""
 
@@ -573,17 +604,18 @@ def run_scan():
             rev_open.append({"und": p["und"], "fired": str(p["date"])[:10], "day": max(day_n, 0),
                              "entry": float(p["entry"]), "rule": str(p.get("rule", ""))})
 
-    # intraday reversion alerts (self-alerting, deduped per day): buy-at-close
-    # near the close + alignment entry trigger. Independent of the sigma flow.
+    # intraday reversion: fetch each ETF once (board), then buy-at-close + alignment
+    # alerts + the dashboard trend chart. Independent of the sigma flow.
     try:
-        buy_hits = scan_reversion_buyzone()
-        align_hits = scan_alignment()
+        board = reversion_board()
+        buy_hits = scan_reversion_buyzone(board)
+        align_hits = scan_alignment(board)
     except Exception as e:
-        buy_hits = align_hits = []; logging.warning("reversion intraday scan: %s", e)
+        board = []; buy_hits = align_hits = []; logging.warning("reversion intraday scan: %s", e)
 
     write_csv_blob("fires_log.csv", log)
     write_dashboard_blob(render_dashboard(ts, fires, watch, positions, eod_date, closed,
-                                          signals, shadow_closed, shadow_open_n, rev_open, rev_closed))
+                                          signals, shadow_closed, shadow_open_n, rev_open, rev_closed, board))
     return (f"scan ok: fires={len(fires)} watch={len(watch)} pos={len(positions)} "
             f"rev_open={len(rev_open)} buyzone={len(buy_hits)} aligned={len(align_hits)}")
 
