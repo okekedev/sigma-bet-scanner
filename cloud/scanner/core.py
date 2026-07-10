@@ -12,7 +12,9 @@ import io
 import json
 import logging
 import os
+import time
 import urllib.request
+import urllib.error
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 
@@ -94,12 +96,20 @@ def write_dashboard_blob(html):
         html, overwrite=True, content_settings=ContentSettings(content_type="text/html"))
 
 # ---------------- helpers ----------------
-def get_json(url):
-    try:
-        with urllib.request.urlopen(url, timeout=30) as r:
-            return json.loads(r.read())
-    except Exception as e:
-        return {"_error": str(e)}
+def get_json(url, retries=4):
+    """GET JSON with backoff on 429 so bursty fetches (e.g. the 10-ETF board)
+    don't silently drop tickers when the data plan rate-limits."""
+    for i in range(retries):
+        try:
+            with urllib.request.urlopen(url, timeout=30) as r:
+                return json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            if e.code == 429 and i < retries - 1:
+                time.sleep(1.5 * (i + 1)); continue
+            return {"_error": f"HTTP {e.code}"}
+        except Exception as e:
+            return {"_error": str(e)}
+    return {"_error": "429 retries exhausted"}
 
 def now_et():
     # DST-correct Eastern, returned naive (callers use .date()/.hour/.strftime)
