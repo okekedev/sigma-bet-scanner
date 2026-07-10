@@ -41,9 +41,12 @@ fam = lambda t: FAMILY.get(t, t)
 # names -3% ~ 1.3x each ETF's own avg |dev|), hold REV_HOLD days, no early exit,
 # no profit target (winners run). Macro uptrend is shown for context, NOT gated
 # (regime filter unvalidated on <=2yr data). Validated pooled edge ~+1.7%/10d.
-REV_UNIVERSE = {  # ticker: (theme, entry_dev_pct)
+REV_UNIVERSE = {  # ticker: (theme, entry_dev_pct) — threshold ~ sized to each ETF's avg |dev|
     "GLD": ("Gold", -2.0), "SLV": ("Silver", -2.0), "URA": ("Uranium", -3.0),
     "USO": ("Oil", -3.0),  "XBI": ("Biotech", -3.0),
+    # one per industry, thresholds measured from 2yr avg |dev|
+    "URNM": ("Uranium miners", -3.0), "SMH": ("Semiconductors", -3.0),
+    "XHB": ("Homebuilders", -2.0), "KRE": ("Regional banks", -2.0), "XLE": ("Energy", -2.0),
 }
 REV_FAST = 5      # reversion anchor MA
 REV_HOLD = 10     # validated best simple exit (never sell in first 2 days)

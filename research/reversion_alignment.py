@@ -61,11 +61,16 @@ KEY = os.environ.get("MASSIVE_API_KEY", "")
 # theme -> ETF, and the per-ETF entry threshold (calm names revert at -2%, wild
 # ones need -3%; ~1.3x each ETF's own avg |dev| from the research above).
 UNIVERSE = {
-    "GLD": ("Gold",     -2.0),
-    "SLV": ("Silver",   -2.0),
-    "URA": ("Uranium",  -3.0),
-    "USO": ("Oil",      -3.0),
-    "XBI": ("Biotech",  -3.0),
+    "GLD":  ("Gold",            -2.0),
+    "SLV":  ("Silver",          -2.0),
+    "URA":  ("Uranium",         -3.0),
+    "USO":  ("Oil",             -3.0),
+    "XBI":  ("Biotech",         -3.0),
+    "URNM": ("Uranium miners",  -3.0),
+    "SMH":  ("Semiconductors",  -3.0),
+    "XHB":  ("Homebuilders",    -2.0),
+    "KRE":  ("Regional banks",  -2.0),
+    "XLE":  ("Energy",          -2.0),
 }
 
 MA_FAST   = 5      # the reversion anchor
