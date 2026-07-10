@@ -52,6 +52,17 @@ REV_FAST = 5      # reversion anchor MA
 REV_HOLD = 10     # validated best simple exit (never sell in first 2 days)
 DASH_URL = "https://stoptionsscan.z13.web.core.windows.net/"
 
+def regime_of(r10_pct):
+    """10-day trend regime. 'mild-down' (-3 to -8%) is the best dip-bounce regime
+    in backtest (+1.5%/10d, 62% win); dips in uptrends are the weakest."""
+    if r10_pct is None or r10_pct != r10_pct:  # None/NaN
+        return "?"
+    if r10_pct > 0.5:   return "up"
+    if r10_pct > -3:    return "flat"
+    if r10_pct > -8:    return "mild-down"      # sweet spot
+    if r10_pct > -15:   return "steep-down"
+    return "crash"
+
 # ---------------- blob state ----------------
 def _svc():
     from azure.storage.blob import BlobServiceClient
@@ -204,9 +215,12 @@ def scan_reversion(log):
         cur, prev = df.iloc[-1], df.iloc[-2]
         uptrend = bool(pd.notna(ma100.iloc[-1]) and cur["close"] > ma100.iloc[-1]
                        and ma100.iloc[-1] > ma100.iloc[-21])
+        r10 = float(cur["close"] / c.iloc[-11] - 1) * 100 if len(c) >= 11 else float("nan")
+        regime = regime_of(r10)
         fresh = (cur["dev5"] <= dev_thr) and (prev["dev5"] > dev_thr)
         states.append(dict(tk=tk, theme=theme, dev5=cur["dev5"], thr=dev_thr,
-                           close=cur["close"], uptrend=uptrend, buy=fresh))
+                           close=cur["close"], uptrend=uptrend, buy=fresh,
+                           r10=r10, regime=regime, prime=bool(fresh and regime == "mild-down")))
         # manage this ETF's open reversion position (10-day time exit)
         openp = log[(log.get("mode") == "reversion") & (log["und"] == tk) & (log["status"] == "open")]
         for i, p in openp.iterrows():
@@ -266,11 +280,15 @@ def render_daily_brief(rev_states, log, latest_close, day):
              if held(p["date"]) >= REV_HOLD]
     sig_open = open_all[~open_all["mode"].isin(["shadow", "reversion"])] if len(open_all) else open_all
 
+    def r10s(s):
+        v = s.get("r10")
+        return f"{v:+.0f}%" if v is not None and v == v else "—"
     todo = ""
     for s in buys:
-        todo += (f"<div style='color:#238636;font-weight:700;font-size:16px;margin:3px 0'>🟢 BUY "
+        star = "⭐ " if s.get("prime") else ""
+        todo += (f"<div style='color:#238636;font-weight:700;font-size:16px;margin:3px 0'>{star}🟢 BUY "
                  f"{s['tk']} &nbsp;${s['close']:.2f} &nbsp;<span style='font-weight:400;color:#777'>"
-                 f"({s['dev5']:+.1f}% vs 5d)</span></div>")
+                 f"({s['dev5']:+.1f}% vs 5d · 10d {r10s(s)} {s.get('regime','')})</span></div>")
     for tk in exits:
         todo += (f"<div style='color:#b9860b;font-weight:700;font-size:16px;margin:3px 0'>⏰ SELL "
                  f"{tk} &nbsp;<span style='font-weight:400;color:#777'>day-{REV_HOLD} exit</span></div>")
@@ -278,13 +296,17 @@ def render_daily_brief(rev_states, log, latest_close, day):
         todo = "<div style='color:#666;font-size:15px'>✓ No action needed today</div>"
     watch_html = ""
     if watch:
-        chips = " &nbsp;·&nbsp; ".join(f"<b>{s['tk']}</b> {s['dev5']:+.1f}%" for s in watch)
+        chips = " &nbsp;·&nbsp; ".join(f"<b>{s['tk']}</b> {s['dev5']:+.1f}% <span style='color:#aaa'>"
+                                       f"(10d {r10s(s)})</span>" for s in watch)
         watch_html = (f"<div style='font-size:12.5px;color:#888;margin-top:14px'>"
                       f"Watching (nearing buy): {chips}</div>")
+    prime_note = ("<div style='font-size:12px;color:#238636;margin-top:8px'>"
+                  "⭐ = dip in a mild-down (−3 to −8%) 10-day trend — the best-bounce regime.</div>"
+                  if any(s.get("prime") for s in buys) else "")
     return (f"<div style='font-family:-apple-system,sans-serif;max-width:440px;margin:auto;color:#222'>"
             f"<div style='font-size:13px;color:#999'>📊 {day}</div>"
             f"<h2 style='margin:2px 0 12px'>Today’s brief</h2>"
-            f"{todo}{watch_html}"
+            f"{todo}{prime_note}{watch_html}"
             f"<div style='font-size:12.5px;color:#888;margin-top:6px'>"
             f"Open: {len(rev_open)} ETF · {len(sig_open)} options</div>"
             f"<a href='{DASH_URL}' style='display:inline-block;margin-top:16px;background:#238636;"
@@ -324,8 +346,11 @@ def reversion_board():
         elif cur < 0 and cur > dev.iloc[-3]:    state = "turning"   # up over last 2 sessions
         elif cur < 0:                           state = "below"
         else:                                   state = "above"
+        r10 = float(c.iloc[-1] / c.iloc[-11] - 1) * 100 if len(c) >= 11 else float("nan")
+        regime = regime_of(r10)
         board.append(dict(tk=tk, theme=theme, thr=thr, price=float(c.iloc[-1]),
-                          cur=float(cur), prev=float(prev), state=state,
+                          cur=float(cur), prev=float(prev), state=state, r10=r10, regime=regime,
+                          prime=bool(state == "buy" and regime == "mild-down"),
                           dev30=[round(float(x), 2) for x in dev.dropna().iloc[-30:]]))
     board.sort(key=lambda b: b["cur"])
     return board
@@ -353,13 +378,19 @@ def rev_chart_html(board):
     cells = ""
     for b in board:
         col = STATE_COLOR[b["state"]]
-        cells += (f"<div style='background:#0d1117;border:1px solid #21262d;border-radius:8px;padding:9px 10px'>"
+        r10 = b.get("r10", float("nan"))
+        r10s = f"{r10:+.1f}%" if r10 == r10 else "—"
+        prime = b.get("prime")
+        star = "⭐ " if prime else ""
+        border = "#3fb950" if prime else "#21262d"
+        cells += (f"<div style='background:#0d1117;border:1px solid {border};border-radius:8px;padding:9px 10px'>"
                   f"<div style='display:flex;justify-content:space-between;align-items:baseline'>"
-                  f"<b>{b['tk']}</b><span style='color:{col};font-weight:700;font-variant-numeric:tabular-nums'>"
+                  f"<b>{star}{b['tk']}</b><span style='color:{col};font-weight:700;font-variant-numeric:tabular-nums'>"
                   f"{b['cur']:+.2f}%</span></div>"
                   f"<div style='font-size:10px;color:{col}'>{STATE_LABEL[b['state']]}</div>"
+                  f"<div style='font-size:10px;color:#8b949e'>10d {r10s} · {b.get('regime','?')}</div>"
                   f"{_spark_svg(b['dev30'], b['thr'], col)}</div>")
-    return ("<details open><summary>ETF reversion — dev vs 5-day MA (30d) "
+    return ("<details open><summary>ETF reversion — dev vs 5-day MA (30d) · ⭐ = dip in mild-down regime "
             f"<span class='count'>{len(board)}</span></summary>"
             "<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));"
             f"gap:8px;padding:12px'>{cells}</div></details>")
