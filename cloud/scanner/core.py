@@ -397,9 +397,11 @@ def _spark_svg(dev30, thr, color, W=200, H=44):
     xf = lambda i: 4 + i * (W - 8) / max(1, len(dev30) - 1)
     yf = lambda v: round(H - (max(ymin, min(ymax, v)) - ymin) / (ymax - ymin) * H, 1)
     path = " ".join(("L" if i else "M") + f"{xf(i):.1f} {yf(v):.1f}" for i, v in enumerate(dev30))
-    return (f"<svg viewBox='0 0 {W} {H}' preserveAspectRatio='none' style='width:100%;height:{H}px;margin-top:4px'>"
+    return (f"<svg viewBox='0 0 {W} {H}' style='width:100%;height:{H}px;margin-top:4px'>"
             f"<line x1='0' y1='{yf(0)}' x2='{W}' y2='{yf(0)}' stroke='#484f58' stroke-width='1'/>"
+            f"<text x='{W}' y='{yf(0)-2}' text-anchor='end' font-size='7' fill='#484f58'>5d MA</text>"
             f"<line x1='0' y1='{yf(thr)}' x2='{W}' y2='{yf(thr)}' stroke='#f85149' stroke-width='1' stroke-dasharray='3 3' opacity='.5'/>"
+            f"<text x='{W}' y='{yf(thr)-2}' text-anchor='end' font-size='7' fill='#f85149' opacity='.7'>buy {thr:.0f}%</text>"
             f"<path d='{path}' fill='none' stroke='{color}' stroke-width='2' stroke-linejoin='round'/>"
             f"<circle cx='{xf(len(dev30)-1):.1f}' cy='{yf(dev30[-1])}' r='3.5' fill='{color}'/></svg>")
 
