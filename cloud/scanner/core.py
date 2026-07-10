@@ -315,7 +315,7 @@ def render_daily_brief(rev_states, day):
                       f"{rows}</div>")
     return (f"<div style='font-family:-apple-system,sans-serif;max-width:480px;margin:auto;"
             f"padding:8px;color:#222'>"
-            f"<div style='font-size:13px;color:#999'>📊 {day}</div>"
+            f"<div style='font-size:13px;color:#999'>{day}</div>"
             f"<h2 style='margin:2px 0 12px;font-size:20px'>Today’s brief</h2>"
             f"{todo}{prime_note}{below_html}"
             f"<a href='{DASH_URL}' style='display:block;text-align:center;margin-top:18px;"
@@ -341,7 +341,7 @@ def send_brief(tag, force=False):
               for b in board]
     day = now_et().strftime("%Y-%m-%d")
     buys = [s["tk"] for s in states if s["buy"]]
-    subject = f"🟢 ETFs — BUY {', '.join(buys)}" if buys else f"📊 ETFs · {day}"
+    subject = f"ETFs — BUY {', '.join(buys)}" if buys else f"ETFs · {day}"
     alert_once(f"brief:{tag}:{day}", subject, render_daily_brief(states, day))
     return f"brief {tag}: {len(buys)} buys / {len(states)} etf"
 
@@ -523,7 +523,7 @@ def render_dashboard(ts, fires, watch, eod_date, board=None):
  table{{border-collapse:collapse;width:100%;font-size:14px}} td{{padding:9px 14px;border-top:1px solid var(--line)}}
  .dim{{color:var(--ink3)}} .count{{color:var(--ink3);font-weight:400}} b{{color:var(--ink)}}
 </style></head><body>
-<header><h1>⚡ Reversion Scanner <span style="color:#484f58;font-size:11px">azure · alerts-only</span></h1>
+<header><h1>Reversion Scanner <span style="color:#484f58;font-size:11px">azure · alerts-only</span></h1>
 <span class="ts">{ts} ET · data thru {eod_date}</span></header>
 <div class="kpis">{kpis}</div>
 {fire_cards}
