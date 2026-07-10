@@ -340,9 +340,10 @@ def send_brief(tag, force=False):
                    buy=(b["state"] == "buy"), r10=b["r10"], regime=b["regime"], prime=b["prime"])
               for b in board]
     day = now_et().strftime("%Y-%m-%d")
-    label = "Pre-close" if tag == "pm" else "Morning"
-    alert_once(f"brief:{tag}:{day}", f"📊 {label} brief · {day}", render_daily_brief(states, day))
-    return f"brief {tag}: {sum(1 for s in states if s['buy'])} buys / {len(states)} etf"
+    buys = [s["tk"] for s in states if s["buy"]]
+    subject = f"🟢 ETFs — BUY {', '.join(buys)}" if buys else f"📊 ETFs · {day}"
+    alert_once(f"brief:{tag}:{day}", subject, render_daily_brief(states, day))
+    return f"brief {tag}: {len(buys)} buys / {len(states)} etf"
 
 # ---------------- intraday reversion ALIGNMENT (entry trigger) ----------------
 def fetch_etf_15m(tk, days=40):
