@@ -315,6 +315,21 @@ def render_daily_brief(rev_states, log, latest_close, day):
             f"<div style='font-size:11px;color:#aaa;margin-top:14px'>Buy fresh dip below 5-day MA, "
             f"hold {REV_HOLD}d. Full 10-ETF chart at the link.</div></div>")
 
+def send_brief(tag):
+    """Build + send the actionable brief from live ETF data. Runs on its own timer
+    (pre-close + morning), independent of the heavy nightly EOD job. Uses the same
+    reversion_board() as the dashboard so numbers match. tag: 'pm' | 'am'."""
+    _, _, log = load_state()
+    board = reversion_board()
+    states = [dict(tk=b["tk"], theme=b["theme"], dev5=b["cur"], thr=b["thr"], close=b["price"],
+                   buy=(b["state"] == "buy"), uptrend=(b["regime"] == "up"),
+                   r10=b["r10"], regime=b["regime"], prime=b["prime"]) for b in board]
+    day = now_et().strftime("%Y-%m-%d")
+    label = "Pre-close" if tag == "pm" else "Morning"
+    alert_once(f"brief:{tag}:{day}", f"📊 {label} brief · {day}",
+               render_daily_brief(states, log, {}, day))
+    return f"brief {tag}: {sum(1 for s in states if s['buy'])} buys / {len(states)} etf"
+
 # ---------------- intraday reversion ALIGNMENT (entry trigger) ----------------
 def fetch_etf_15m(tk, days=40):
     frm = (now_et() - timedelta(days=days)).strftime("%Y-%m-%d")
@@ -794,18 +809,14 @@ def run_eod():
         log_shadow(f[base_gate & (f["sh10"] >= 0.10) & (f["n310"] >= FIRE_NOTIONAL) & f["put_absent"]],
                    "v5.2 (sh10 + $250k + put-ABSENT)")
 
-    # ETF mean-reversion scan + combined daily brief (independent of sigma flow)
+    # ETF mean-reversion position management (the email brief is sent separately by
+    # the send_brief timers at pre-close + morning, so it's not fired here).
     try:
         log, rev_fires, rev_states = scan_reversion(log)
-        last_day = str(closes["date"].max())[:10]
-        latest_close = closes.sort_values("date").groupby("und").tail(1).set_index("und")["close"]
-        # one combined morning email every night, deduped per day
-        alert_once(f"dailybrief:{last_day}", f"📊 Daily brief · {last_day}",
-                   render_daily_brief(rev_states, log, latest_close, last_day))
         if rev_fires:
             msgs.append("reversion buy: " + ",".join(f["tk"] for f in rev_fires))
     except Exception as e:
-        msgs.append(f"reversion/brief error: {e}")
+        msgs.append(f"reversion error: {e}")
 
     write_csv_blob("closes.csv", closes)
     if sb is not None: write_csv_blob("sigma_bets_daily.csv", sb)

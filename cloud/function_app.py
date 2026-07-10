@@ -24,6 +24,15 @@ def eod_update(timer: func.TimerRequest) -> None:
     result = core.run_eod()
     logging.info("eod_update: %s", result)
 
+# actionable brief email — pre-close + morning (times are UTC; CDT = UTC-5 in summer)
+@app.timer_trigger(schedule="0 30 19 * * 1-5", arg_name="timer", run_on_startup=False)
+def brief_preclose(timer: func.TimerRequest) -> None:   # 2:30p CT / 3:30p ET — buy before close
+    logging.info("brief_preclose: %s", core.send_brief("pm"))
+
+@app.timer_trigger(schedule="0 0 8 * * 1-5", arg_name="timer", run_on_startup=False)
+def brief_morning(timer: func.TimerRequest) -> None:    # 3:00a CT / 4:00a ET
+    logging.info("brief_morning: %s", core.send_brief("am"))
+
 @app.route(route="run", auth_level=func.AuthLevel.FUNCTION)
 def run_manual(req: func.HttpRequest) -> func.HttpResponse:
     job = req.params.get("job", "scan")
