@@ -149,23 +149,51 @@ Split-decontaminated on both sides (494 splits in window, 334 of them reverse �
 | **Clip-accumulation events** | 505 | **14.9% (1.3×)** | **3.6% (1.1×)** | 15.8% |
 | Events + relative-flow leg | 145 | 11.7% (1.0×) | 2.1% (0.7×) | 13.1% |
 
-**Conclusion: the pattern does not predict pops.** Prospectively it is ~1.3× lift at
-best, and *adding* the relative-flow leg that looked so clean on WRAP pushes it to 1.0×
-(no edge). WRAP and EVC do surface as events (sanity check passed) — but they sit in a
-crowd of 505 that collectively behaves like the control. **The three positives were
-survivorship bias.** We found a shape that is common among poppers and equally common
-among non-poppers — the exact failure mode HYPOTHESIS.md documents for v1–v4, now
-reproduced a fifth time on a per-contract feature.
+**Conclusion (aggregate): the *mild* pattern does not predict pops.** With lenient
+thresholds (≥$5k, ≥60% top-strike share, K/S 1.1–2.2) it is ~1.3× lift, 1.0× once a
+≥10× relative-flow leg is added. At that altitude the 505 events behave like the
+control. So the shape as loosely defined is common among poppers AND non-poppers — the
+v1–v4 failure mode.
 
-The "strike ≈ eventual price" regularity (open q#3) also dissolves: events touch their
-accumulated strike within 15 days only 15.8% of the time. WRAP/AARD/EVC landing on their
-strikes was 2-of-3 coincidence, not a tell.
+### BUT — the extreme tail lifts (dose-response). See `dose_response.py`.
 
-This is a *clean negative result*, and a valuable one: it says stop building this
-particular detector. The single genuinely-untested residual is **put silence as a
-standalone discriminator** — but the blob only has put data from 2026-07-06, so the
-whole window here is call-only and can't isolate it. That is exactly and only what the
-PR #10 shadow logger is positioned to answer, forward, without survivorship bias.
+The mild test buried a real tail by averaging it with noise. Stratifying the clip days
+(n=3,661, split-decontaminated) by **size** (clip call$ / own 20d median) and **raw
+moneyness** (K/S of the top strike):
+
+Size axis is **monotonic**: 2–10× → 1.1× | 10–50× → 1.1× | 50–200× → 1.2× (+40% 1.6×) |
+200–1000× → **1.6×** (+40% **2.5×**, n=52).
+
+The corner (extreme size AND deep OTM together) is where it concentrates:
+
+| Corner | n | +20%/10d | +40%/10d | mean |
+|---|---|---|---|---|
+| size ≥50× & K/S ≥1.5 | 50 | **28.0% (2.4×)** | 6.0% (1.9×) | +14.2% |
+| size ≥200× & K/S ≥1.5 | 11 | **36.4% (3.1×)** | 9.1% (2.9×) | +18.6% |
+
+The n=50 corner is z≈3.6 over the 11.7% base (p≈3e-4), spread over **35 distinct
+tickers**, no single name dominating, and it does **not** contain WRAP/AARD/EVC — so it
+is not the seed-case survivorship. This revises the earlier "clean negative": the
+*aggregate* is null, but the *extreme corner* is a genuine ~2.4–3.1× tail.
+
+**Three caveats that keep this honest:**
+1. **It's size × raw-OTM, NOT sigma-depth.** Sigma-distance alone is flat-to-negative
+   (sig_dist 1–2 → 0.9×, 2–3 → 0.7×). "Unrealistic strike" in the v5 d2 sense is the
+   wrong axis here; plain far-OTM (K/S≥1.5) × extreme relative volume is the right one.
+2. **Moderate magnitude, small n.** 2.4–3.1× is the ~2× "how-much-flow" ceiling's
+   neighborhood, far from v5's 10–25×; the sharpest cell is n=11. Not yet an edge.
+3. **The seed cases sit below the corner** (WRAP clips ≤24× baseline, EVC low-size).
+   The "4000× normal size" impression matches their *pop-day* flow (~1440× for WRAP),
+   not the pre-pop accumulation. Corner tickers also include vol products (VIXM) that
+   are structural noise, not informed bets — the corner needs a junk filter.
+
+The "strike ≈ eventual price" regularity (open q#3) still dissolves: events touch their
+accumulated strike within 15 days only 15.8% of the time.
+
+**Two live threads, not zero:** (a) the extreme-corner tail deserves forward
+confirmation with tighter thresholds (size ≥50× AND K/S ≥1.5, ex vol-products); (b) put
+silence as a standalone discriminator remains untestable backward (blob has puts only
+from 2026-07-06). The PR #10 shadow logger covers both if retuned to the corner.
 
 ## Open questions that remain
 
