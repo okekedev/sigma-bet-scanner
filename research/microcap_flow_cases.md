@@ -129,11 +129,49 @@ the split-adjacent move is unknowable from day aggregates.)
   concentration, clips-into-weakness, put silence) are exactly what those aggregates
   can't see — and put data only exists in the blob from 2026-07-06 onward.
 
-## Open questions for more cases
+## Prospective test — the survivorship-honest answer (open question #1)
 
-1. How often does the single-strike/clips/put-silence tape occur *without* a pop?
-   (The shadow log + per-contract follow-up answers this without survivorship bias.)
+We built the pattern as a **forward-looking scanner** and ran it over every trading day
+in the window, measuring what happened next regardless of whether a pop followed. This
+is the test that matters, because every case above was found by starting from a pop.
+
+**Method:** aggregate all 53 daily OPRA tapes into per-(ticker,day) strike concentration
+(scripts `tape_scan.py` / `tape_assemble.py`). A **clip day** = call notional ≥ $5k, the
+single top strike holds ≥60% of call dollars, K/S in [1.1, 2.2], DTE ≥ 7, puts ≤ 25% of
+call dollars. An **event** = 2+ clip days on the *same strike* within 10 trading days with
+< 25% price move between them (the WRAP/EVC fingerprint, stated ex-ante). Forward = max
+close over the next 10/15 trading days. Control = all optionable $1–25 ticker-days.
+Split-decontaminated on both sides (494 splits in window, 334 of them reverse — see SVC).
+
+| Group | n | +20% in 10d | +40% in 10d | touched the strike (15d) |
+|---|---|---|---|---|
+| Control (optionable $1–25) | 92,999 | 11.7% | 3.1% | — |
+| **Clip-accumulation events** | 505 | **14.9% (1.3×)** | **3.6% (1.1×)** | 15.8% |
+| Events + relative-flow leg | 145 | 11.7% (1.0×) | 2.1% (0.7×) | 13.1% |
+
+**Conclusion: the pattern does not predict pops.** Prospectively it is ~1.3× lift at
+best, and *adding* the relative-flow leg that looked so clean on WRAP pushes it to 1.0×
+(no edge). WRAP and EVC do surface as events (sanity check passed) — but they sit in a
+crowd of 505 that collectively behaves like the control. **The three positives were
+survivorship bias.** We found a shape that is common among poppers and equally common
+among non-poppers — the exact failure mode HYPOTHESIS.md documents for v1–v4, now
+reproduced a fifth time on a per-contract feature.
+
+The "strike ≈ eventual price" regularity (open q#3) also dissolves: events touch their
+accumulated strike within 15 days only 15.8% of the time. WRAP/AARD/EVC landing on their
+strikes was 2-of-3 coincidence, not a tell.
+
+This is a *clean negative result*, and a valuable one: it says stop building this
+particular detector. The single genuinely-untested residual is **put silence as a
+standalone discriminator** — but the blob only has put data from 2026-07-06, so the
+whole window here is call-only and can't isolate it. That is exactly and only what the
+PR #10 shadow logger is positioned to answer, forward, without survivorship bias.
+
+## Open questions that remain
+
+1. ~~How often does the tape occur without a pop?~~ **Answered: constantly. No edge.**
 2. Do the clips print at ask (aggressor buys)? Needs intraday OPRA trades, not day aggs.
-3. Is strike ≈ eventual price a real regularity or 2-of-3 coincidence?
-4. What were the catalysts (news/filings) on pop days — is the flow front-running
-   scheduled events or unscheduled ones?
+   (Only worth pursuing if the forward put-silence signal shows life first.)
+3. ~~Is strike ≈ eventual price a real regularity?~~ **Answered: no, 15.8% touch rate.**
+4. What were the catalysts on the *specific* pop days (WRAP/AARD/EVC)? Even as anecdotes
+   these were real moves; understanding the trigger is separate from the failed detector.
