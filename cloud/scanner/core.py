@@ -262,13 +262,16 @@ def render_microcap_section(rows):
                 "<div style='font-size:13px;color:#888;margin:4px 0'>· none today</div></div>")
     cards = ""
     for r in rows:
+        dte = int(r.get("dte") or 0)
+        horizon = "soon" if dte <= 45 else ("weeks out" if dte <= 90 else "months out")
         cards += (f"<div style='background:#12261a;border:1px solid #238636;border-radius:8px;"
                   f"padding:9px 11px;margin:6px 0'>"
                   f"<div style='font-size:16px;font-weight:700;color:#238636'>🔎 {r['und']} "
                   f"<span style='color:#222'>${r['close']:.2f}</span></div>"
                   f"<div style='font-size:12px;color:#555;margin-top:2px'>${r['strike']:.1f} calls "
-                  f"({r['ks']:.2f}× spot) · ${r['call_notional']/1e3:.0f}k = {r['x_base']:.0f}× baseline · "
-                  f"{r['top_share']:.0%} one strike · puts {r['put_share']:.0%}</div>"
+                  f"exp {r.get('expiry','?')} ({dte}d — {horizon}) · {r['ks']:.2f}× spot</div>"
+                  f"<div style='font-size:12px;color:#555'>${r['call_notional']/1e3:.0f}k = "
+                  f"{r['x_base']:.0f}× baseline · {r['top_share']:.0%} one strike · puts {r['put_share']:.0%}</div>"
                   f"<div style='font-size:11px;color:#888;margin-top:1px'>"
                   f"{r['below_hi']:+.0%} vs 20d high · beaten-down + deep-OTM call buying</div></div>")
     return ("<div style='margin-top:18px'><div style='font-size:11px;color:#999;"
@@ -510,8 +513,8 @@ MICRO_DEDUP_DAYS = 14
 def microcap_signals(closes, sb, prior):
     """Flag microcap flow signals for the latest day in `sb`. Pure function of the
     state frames (offline-testable). Returns a DataFrame; empty if none fire."""
-    cols = ["date","und","close","strike","ks","call_notional","x_base","top_share",
-            "put_share","below_hi","dte"]
+    cols = ["date","und","close","strike","expiry","dte","ks","call_notional","x_base",
+            "top_share","put_share","below_hi"]
     if sb is None or not {"top_strike","top_notional","put_notional"}.issubset(sb.columns):
         return pd.DataFrame(columns=cols)
     sbx = sb.sort_values(["und","date"]).copy()
@@ -546,6 +549,9 @@ def microcap_signals(closes, sb, prior):
         t = t[~t["und"].isin(set(recent["und"]))]
     if t.empty:
         return pd.DataFrame(columns=cols)
+    # expiration of the accumulated strike (dte is exact calendar days from the
+    # trade date) — shows the buyer's horizon: near-dated = a bet on a move SOON.
+    t["expiry"] = (t["date"] + pd.to_timedelta(t["dte"].fillna(0), unit="D")).dt.strftime("%Y-%m-%d")
     t["date"] = t["date"].dt.strftime("%Y-%m-%d")
     t["x_base"] = t["x_base"].round(0)
     out = t.reindex(columns=cols)
