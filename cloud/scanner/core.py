@@ -1,10 +1,11 @@
 """Sigma-bet scanner core — cloud port with Azure Blob state.
 
 State blobs (container "state"):
-  closes.csv            und,date,close       (rolling ~90 days)
-  sigma_bets_daily.csv  und,date,call_notional,n3_notional
-  fires_log.csv         positions + shadow log
-  alerts_sent.json      email dedup keys
+  closes.csv             und,date,close  (rolling ~90 days)
+  sigma_bets_daily.csv   und,date,call/put notional + top call strike (~90 days)
+  microcap_signals.csv   latest build's microcap flow flags (current watchlist)
+  microcap_log.csv       rolling microcap flag history (dedup source)
+  alerts_sent.json       email dedup keys
 Dashboard -> container "$web"/index.html (static website).
 """
 import gzip
@@ -24,20 +25,14 @@ import pandas as pd
 API = "https://api.massive.com"
 KEY = os.environ["MASSIVE_API_KEY"]
 
+# sigma-fire thresholds — used by the dashboard's fire detection (run_scan) and
+# the nightly sigma-bet build (build_sigma_day).
 SPIKE_NOTIONAL = 100_000
 SPIKE_SHARE    = 0.20
 FIRE_NOTIONAL  = 250_000
 DRIFT_LO, DRIFT_HI = 0.05, 0.30
 DTE_MAX   = 60
 SIGMA_MIN = 3.0
-HOLD_DAYS = 12
-STOP_CLOSE = -0.15
-DEDUP_DAYS = 21
-LOT = 100
-
-FAMILY = {"NVDL":"NVDA","SNXX":"SNDK","SNDU":"SNDK","SNDG":"SNDK","MULL":"MU",
-          "WDCX":"WDC","DLLL":"DELL","INTW":"INTC","MVLL":"MRVL","MRVU":"MRVL"}
-fam = lambda t: FAMILY.get(t, t)
 
 # ---------------- ETF mean-reversion (see research/reversion_alignment.py) ----------------
 # Buy a fresh cross below the 5-day MA, per-ETF threshold (calm names -2%, wild
@@ -219,72 +214,6 @@ def fetch_etf_daily(tk, days=400):
     df["date"] = pd.to_datetime(df["ts"], unit="ms")
     return df[["date", "close"]].sort_values("date").reset_index(drop=True)
 
-def scan_reversion(log):
-    """Fresh-dip detection + 10-day exit management for the ETF universe.
-    Mutates and returns (log, fires, states). Self-contained: uses its own
-    ETF bars, so it never touches the sigma `closes` blob."""
-    fires, states = [], []
-    for tk, (theme, dev_thr) in REV_UNIVERSE.items():
-        df = fetch_etf_daily(tk)
-        if df is None or len(df) < 120:
-            continue
-        c = df["close"]
-        ma5 = c.rolling(REV_FAST, min_periods=REV_FAST).mean()
-        df["dev5"] = (c - ma5) / ma5 * 100.0
-        ma100 = c.rolling(100, min_periods=100).mean()
-        cur, prev = df.iloc[-1], df.iloc[-2]
-        uptrend = bool(pd.notna(ma100.iloc[-1]) and cur["close"] > ma100.iloc[-1]
-                       and ma100.iloc[-1] > ma100.iloc[-21])
-        r10 = float(cur["close"] / c.iloc[-11] - 1) * 100 if len(c) >= 11 else float("nan")
-        regime = regime_of(r10)
-        fresh = (cur["dev5"] <= dev_thr) and (prev["dev5"] > dev_thr)
-        states.append(dict(tk=tk, theme=theme, dev5=cur["dev5"], thr=dev_thr,
-                           close=cur["close"], uptrend=uptrend, buy=fresh,
-                           r10=r10, regime=regime, prime=bool(fresh and regime == "mild-down")))
-        # manage this ETF's open reversion position (10-day time exit)
-        openp = log[(log.get("mode") == "reversion") & (log["und"] == tk) & (log["status"] == "open")]
-        for i, p in openp.iterrows():
-            day_n = int(np.busday_count(np.datetime64(pd.Timestamp(p["date"]).date()),
-                                        np.datetime64(pd.Timestamp(cur["date"]).date())))
-            if day_n >= REV_HOLD:
-                ret = cur["close"] / p["entry"] - 1
-                log.loc[i, ["status", "exit_date", "exit_price", "exit_ret", "exit_reason"]] = \
-                    ["closed", str(cur["date"])[:10], cur["close"], ret, f"day-{REV_HOLD} close"]
-                alert_once(f"revclose:{tk}:{str(cur['date'])[:10]}",
-                           f"⏰ CLOSED {tk} reversion ({ret:+.1%})",
-                           f"<p>{tk} {theme}: entry ${p['entry']:.2f} → "
-                           f"${cur['close']:.2f} ({ret:+.1%}) — day-{REV_HOLD} exit.</p>")
-        # fresh dip and nothing open for this ETF -> new paper entry
-        if fresh and not len(openp):
-            log = pd.concat([log, pd.DataFrame([dict(
-                date=cur["date"], und=tk, family=tk, entry=cur["close"],
-                status="open", mode="reversion", rule=f"dip{dev_thr:.0f}")])], ignore_index=True)
-            fires.append(dict(tk=tk, theme=theme, dev5=cur["dev5"],
-                              close=cur["close"], uptrend=uptrend))
-    return log, fires, states
-
-def render_reversion_email(fires, states):
-    def row(s):
-        flag = "🟢 BUY" if s["buy"] else ("· below" if s["dev5"] < 0 else "above")
-        trend = "↑ uptrend" if s["uptrend"] else "↓ / flat"
-        return (f"<tr><td>{s['tk']}</td><td>{s['theme']}</td>"
-                f"<td style='text-align:right'>{s['dev5']:+.2f}%</td>"
-                f"<td style='text-align:right'>{s['thr']:.0f}%</td>"
-                f"<td>{flag}</td><td>{trend}</td></tr>")
-    body = "".join(row(s) for s in sorted(states, key=lambda x: x["dev5"]))
-    names = ", ".join(f"{f['tk']} ({f['dev5']:+.1f}%)" for f in fires)
-    return (f"<h3>ETF reversion buy zone: {names}</h3>"
-            f"<p>Fresh cross below the 5-day MA. Rule: hold {REV_HOLD} days, "
-            f"no early exit, no profit target. Trend column is context only.</p>"
-            f"<table border='1' cellpadding='6' cellspacing='0' "
-            f"style='border-collapse:collapse;font-family:sans-serif'>"
-            f"<tr><th>ETF</th><th>theme</th><th>dev vs 5d MA</th><th>buy threshold</th>"
-            f"<th>signal</th><th>100d trend</th></tr>{body}</table>")
-
-def _sum_ret(df):
-    if not len(df) or "exit_ret" not in df.columns: return 0.0
-    return float(df["exit_ret"].fillna(0).sum()) * LOT
-
 def render_daily_brief(rev_states, day):
     """Mobile-first actionable snapshot: BUY signals today + below-MA watch +
     link to the live chart. Alerts only — no positions/P&L."""
@@ -389,18 +318,6 @@ def _digest_html(states, micro, day):
     return base.replace("<a href", inject, 1)   # insert microcap just above the chart button
 
 # ---------------- intraday reversion ALIGNMENT (entry trigger) ----------------
-def fetch_etf_15m(tk, days=40):
-    frm = (now_et() - timedelta(days=days)).strftime("%Y-%m-%d")
-    to  = now_et().strftime("%Y-%m-%d")
-    js = get_json(f"{API}/v2/aggs/ticker/{tk}/range/15/minute/{frm}/{to}"
-                  f"?adjusted=true&sort=asc&limit=50000&apiKey={KEY}")
-    if "_error" in js or not js.get("results"):
-        return None
-    df = pd.DataFrame(js["results"]).rename(columns={"c": "close", "t": "ts"})
-    df["hr"] = (df["ts"] // 1000 % 86400) // 3600
-    df = df[(df["hr"] >= 14) & (df["hr"] <= 20)]          # core RTH, both DST regimes
-    return df[["ts", "close"]].sort_values("ts").reset_index(drop=True)
-
 def reversion_board():
     """Fetch each ETF's daily bars ONCE and compute its state + 30-day deviation
     trajectory. Single source for the intraday buy/align alerts AND the dashboard
@@ -473,58 +390,6 @@ def rev_chart_html(board):
             "<div style='display:grid;grid-template-columns:repeat(auto-fill,minmax(148px,1fr));"
             f"gap:8px;padding:12px'>{cells}</div></details>")
 
-def scan_alignment(board):
-    """Intraday entry trigger. For each ETF in its daily buy zone, alert when the
-    1h/5h/5d timeframes all sit below their means at once (validated: times the
-    entry ~30% better 1-2d). Deduped once per ETF per day. Uses `board` for the
-    daily context (no daily re-fetch); only pulls 15-min bars for oversold names."""
-    hits = []
-    for b in board:
-        if b["cur"] > b["thr"]:                           # not oversold on the daily -> skip
-            continue
-        m = fetch_etf_15m(b["tk"])
-        if m is None or len(m) < 130:
-            continue
-        cc = m["close"]
-        def dv(w):
-            ma = cc.rolling(w, min_periods=w).mean().iloc[-1]
-            return (cc.iloc[-1] - ma) / ma * 100.0 if pd.notna(ma) else np.nan
-        d1h, d5h, d5d = dv(4), dv(20), dv(130)
-        if pd.notna(d5d) and d1h < 0 and d5h < 0 and d5d < 0:   # 3/3 aligned below
-            hits.append(dict(tk=b["tk"], theme=b["theme"], daily_dev=b["cur"], d1h=d1h,
-                             d5h=d5h, d5d=d5d, price=cc.iloc[-1]))
-    for h in hits:
-        alert_once(f"revalign:{h['tk']}:{now_et().strftime('%Y-%m-%d')}",
-            f"🎯 {h['tk']} aligned — reversion entry ({h['daily_dev']:+.1f}% vs 5d)",
-            f"<div style='font-family:-apple-system,sans-serif;padding:20px;text-align:center'>"
-            f"<div style='font-size:38px;font-weight:800;color:#238636'>🎯 {h['tk']}</div>"
-            f"<div style='font-size:26px;font-weight:700;margin:6px 0'>${h['price']:.2f}</div>"
-            f"<div style='font-size:15px;color:#555'>all timeframes aligned below mean — entry window</div>"
-            f"<div style='font-size:13px;color:#888;margin-top:8px'>daily {h['daily_dev']:+.1f}% · "
-            f"1h {h['d1h']:+.2f}% · 5h {h['d5h']:+.2f}% · 5d {h['d5d']:+.2f}%</div></div>")
-    return hits
-
-def scan_reversion_buyzone(board):
-    """Late-day (>=3pm ET) buy-at-close alert. The backtest enters at the CLOSE of
-    the dip day, so this fires the daily BUY on the last intraday cycle -- in time
-    to act -- rather than waiting for the 5a nightly job (a day late). Read-only;
-    the nightly job logs the entry on the settled close. Uses `board`. Deduped/day."""
-    if now_et().hour < 15:            # only near the close (~3:45p ET cycle)
-        return []
-    hits = [dict(tk=b["tk"], theme=b["theme"], dev=b["cur"], price=b["price"], thr=b["thr"])
-            for b in board if b["cur"] <= b["thr"] and b["prev"] > b["thr"]]
-    for h in hits:
-        alert_once(f"revbuyclose:{h['tk']}:{now_et().strftime('%Y-%m-%d')}",
-            f"🟢 {h['tk']} buy at close ({h['dev']:+.1f}% vs 5d MA)",
-            f"<div style='font-family:-apple-system,sans-serif;padding:20px;text-align:center'>"
-            f"<div style='font-size:38px;font-weight:800;color:#238636'>🟢 {h['tk']}</div>"
-            f"<div style='font-size:26px;font-weight:700;margin:6px 0'>${h['price']:.2f}</div>"
-            f"<div style='font-size:15px;color:#555'>{h['theme']} — fresh dip below 5-day MA · "
-            f"buy at close</div>"
-            f"<div style='font-size:13px;color:#888;margin-top:8px'>{h['dev']:+.1f}% vs 5d "
-            f"(threshold {h['thr']:.0f}%) · hold {REV_HOLD}d</div></div>")
-    return hits
-
 # ---------------- dashboard (same layout as local) ----------------
 def render_dashboard(ts, fires, watch, eod_date, board=None):
     """Alerts-only dashboard: current signals + the ETF reversion chart. No paper
@@ -576,9 +441,10 @@ def render_dashboard(ts, fires, watch, eod_date, board=None):
 
 # ---------------- SCAN CYCLE (every 2h intraday) ----------------
 def run_scan():
-    """Intraday: detect sigma option FIRES (alert only, no positions) + run the
-    ETF reversion board (buy-at-close + alignment alerts) + refresh the dashboard."""
-    closes, sb, log = load_state()
+    """Intraday, DASHBOARD-ONLY (no emails): detect sigma option fires + refresh
+    the ETF reversion board, and rewrite the static dashboard. All actionable
+    output goes out in the single 4:30a ET morning digest (see send_brief)."""
+    closes, sb, _ = load_state()
     if closes is None or sb is None:
         return "state not seeded"
     latest, drift, spikes, eod_date = baselines(closes, sb)
