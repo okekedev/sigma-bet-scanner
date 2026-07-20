@@ -280,6 +280,70 @@ def render_microcap_section(rows):
             "<div style='font-size:10px;color:#aaa;margin-top:4px'>Unusual single-strike call buying "
             "on beaten-down microcaps. ~9-day median lead; ~2/3 fizzle. Not advice — a watchlist.</div></div>")
 
+# ---------------- crypto 5-day-MA reversion (see crypto/reversion_crypto.py) ----------------
+# Same dip-buy model as the ETF board, on the top-20 liquid coins / hourly bars:
+# buy a cross below -1.3x each coin's own avg|dev| from its 5-day (120h) MA, hold
+# ~2 days. Validated +1.4%/trade at 62% win on a 30-day window (regime-relative,
+# small n). Kraken public REST — no key. Listed in the AM email as experimental.
+KRAKEN_PUB = "https://api.kraken.com/0/public"
+CRYPTO_UNIVERSE = {   # coin -> kraken USD pair (top-20 by median hourly $vol, vol-ceiling filtered)
+    "BTC": "XXBTZUSD", "ETH": "XETHZUSD", "SOL": "SOLUSD",  "XRP": "XXRPZUSD",
+    "HYPE": "HYPEUSD", "ZEC": "XZECZUSD", "ADA": "ADAUSD",  "SUI": "SUIUSD",
+    "XLM": "XXLMZUSD", "XMR": "XXMRZUSD", "TAO": "TAOUSD",  "DOGE": "XDGUSD",
+    "LTC": "XLTCZUSD", "NEAR": "NEARUSD", "AVAX": "AVAXUSD", "AAVE": "AAVEUSD",
+    "LINK": "LINKUSD", "CC": "CCUSD",     "ONDO": "ONDOUSD", "TRX": "TRXUSD",
+}
+CRYPTO_MA = 120              # 5-day MA anchor, in hours
+CRYPTO_THRESH_MULT = 1.3     # entry = -1.3x avg|dev| (same sizing as the ETF board)
+
+def crypto_board():
+    """Poll hourly OHLC for each coin and flag the ones currently sitting below
+    their 5-day-MA buy threshold. Returns dicts (coin, price, dev, thr), most-
+    oversold first. Fetches are spaced ~1.2s for Kraken's public rate limit."""
+    buys = []
+    for i, (coin, pair) in enumerate(CRYPTO_UNIVERSE.items()):
+        if i:
+            time.sleep(1.2)
+        d = get_json(f"{KRAKEN_PUB}/OHLC?pair={pair}&interval=60")
+        res = d.get("result") if isinstance(d, dict) else None
+        if not res or d.get("error"):
+            continue
+        key = next((k for k in res if k != "last"), None)
+        rows = res.get(key) or []
+        if len(rows) < CRYPTO_MA + 5:
+            continue
+        closes = pd.Series([float(r[4]) for r in rows])
+        ma = closes.rolling(CRYPTO_MA).mean()
+        dev = (closes - ma) / ma * 100.0
+        cur = dev.iloc[-1]
+        thr = -CRYPTO_THRESH_MULT * dev.abs().mean()
+        if pd.notna(cur) and cur <= thr:
+            buys.append(dict(coin=coin, price=float(closes.iloc[-1]),
+                             dev=float(cur), thr=float(thr)))
+    buys.sort(key=lambda b: b["dev"])
+    return buys
+
+def render_crypto_section(buys):
+    """HTML block for the crypto 5-day-MA reversion buys inside the digest."""
+    if not buys:
+        return ("<div style='margin-top:18px'><div style='font-size:11px;color:#999;"
+                "text-transform:uppercase;letter-spacing:.04em'>Crypto reversion — 5-day MA (experimental)</div>"
+                "<div style='font-size:13px;color:#888;margin:4px 0'>· no dip-buy signal today</div></div>")
+    cards = ""
+    for b in buys:
+        px = f"{b['price']:,.2f}" if b["price"] >= 1 else f"{b['price']:.4f}"
+        cards += (f"<div style='background:#12261a;border:1px solid #238636;border-radius:8px;"
+                  f"padding:9px 11px;margin:6px 0'>"
+                  f"<div style='font-size:16px;font-weight:700;color:#238636'>🟢 BUY {b['coin']} "
+                  f"<span style='color:#222'>${px}</span></div>"
+                  f"<div style='font-size:12px;color:#555;margin-top:2px'>{b['dev']:+.2f}% vs 5-day MA "
+                  f"(buy ≤ {b['thr']:.2f}%) · hold ~2 days</div></div>")
+    return ("<div style='margin-top:18px'><div style='font-size:11px;color:#999;"
+            "text-transform:uppercase;letter-spacing:.04em'>Crypto reversion — 5-day MA (experimental)</div>"
+            f"{cards}"
+            "<div style='font-size:10px;color:#aaa;margin-top:4px'>Top-20 liquid coins. Buy a dip below "
+            "the 5-day MA, hold ~2 days. +1.4%/trade, 62% win on a 30-day test — not advice.</div></div>")
+
 def load_micro_signals():
     """Microcap signals from the blob the EOD job wrote. run_eod overwrites this
     each morning with the latest build's flags, so it is always the current
@@ -307,18 +371,26 @@ def send_brief(tag, force=False, micro=None):
               for b in board]
     day = now_et().strftime("%Y-%m-%d")
     micro = micro if micro is not None else load_micro_signals()
+    try:
+        crypto = crypto_board()
+    except Exception as e:
+        crypto = []; logging.warning("crypto board: %s", e)
     buys = [s["tk"] for s in states if s["buy"]]
     mtk = [m["und"] for m in micro]
-    tags = (["BUY " + ", ".join(buys)] if buys else []) + (["flow " + ", ".join(mtk)] if mtk else [])
-    subject = "ETFs — " + " · ".join(tags) if tags else f"ETFs · {day}"
-    alert_once(f"brief:{tag}:{day}", subject, _digest_html(states, micro, day))
-    return f"brief {tag}: {len(buys)} etf-buys / {len(micro)} microcap / {len(states)} etf"
+    ctk = [c["coin"] for c in crypto]
+    tags = ((["BUY " + ", ".join(buys)] if buys else [])
+            + (["flow " + ", ".join(mtk)] if mtk else [])
+            + (["crypto " + ", ".join(ctk)] if ctk else []))
+    subject = "Dashboard — " + " · ".join(tags) if tags else f"Dashboard · {day}"
+    alert_once(f"brief:{tag}:{day}", subject, _digest_html(states, micro, crypto, day))
+    return (f"brief {tag}: {len(buys)} etf-buys / {len(micro)} microcap / "
+            f"{len(crypto)} crypto / {len(states)} etf")
 
-def _digest_html(states, micro, day):
-    """ETF brief + microcap section stitched into one mobile email."""
+def _digest_html(states, micro, crypto, day):
+    """ETF brief + microcap + crypto sections stitched into one mobile email."""
     base = render_daily_brief(states, day)
-    inject = render_microcap_section(micro) + "<a href"
-    return base.replace("<a href", inject, 1)   # insert microcap just above the chart button
+    inject = render_microcap_section(micro) + render_crypto_section(crypto) + "<a href"
+    return base.replace("<a href", inject, 1)   # insert the watch sections above the chart button
 
 # ---------------- intraday reversion ALIGNMENT (entry trigger) ----------------
 def reversion_board():
