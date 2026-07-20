@@ -48,7 +48,6 @@ REV_UNIVERSE = {  # ticker: (theme, entry_dev_pct) — threshold ~ sized to each
 }
 REV_FAST = 5      # reversion anchor MA
 REV_HOLD = 10     # validated best simple exit (never sell in first 2 days)
-DASH_URL = "https://stoptionsscan.z13.web.core.windows.net/"
 
 def regime_of(r10_pct):
     """10-day trend regime. 'mild-down' (-3 to -8%) is the best dip-bounce regime
@@ -214,71 +213,82 @@ def fetch_etf_daily(tk, days=400):
     df["date"] = pd.to_datetime(df["ts"], unit="ms")
     return df[["date", "close"]].sort_values("date").reset_index(drop=True)
 
-def render_daily_brief(rev_states, day):
-    """Mobile-first actionable snapshot: BUY signals today + below-MA watch +
-    link to the live chart. Alerts only — no positions/P&L."""
-    def r10s(s):
-        v = s.get("r10")
-        return f"{v:+.0f}%" if v is not None and v == v else "—"
-    buys = sorted([s for s in rev_states if s.get("buy")], key=lambda x: x["dev5"])
-    below = sorted([s for s in rev_states if not s.get("buy") and s["dev5"] < 0],
-                   key=lambda x: x["dev5"])[:3]
-    todo = ""
-    for s in buys:
-        star = "⭐ " if s.get("prime") else ""
-        todo += (f"<div style='color:#238636;font-weight:700;font-size:17px;margin:8px 0'>{star}🟢 BUY "
-                 f"{s['tk']} ${s['close']:.2f}<br><span style='font-weight:400;font-size:13px;color:#777'>"
-                 f"{s['dev5']:+.1f}% vs 5d · 10d {r10s(s)} ({s.get('regime','')})</span></div>")
-    if not todo:
-        todo = "<div style='color:#666;font-size:16px'>✓ No buy signal today</div>"
-    prime_note = ("<div style='font-size:12px;color:#238636;margin:8px 0'>"
-                  "⭐ = dip in a mild-down (−3 to −8%) 10-day trend — the best-bounce regime.</div>"
-                  if any(s.get("prime") for s in buys) else "")
-    below_html = ""
-    if below:
-        rows = "".join(f"<div style='font-size:13px;color:#888;margin:3px 0'>"
-                       f"<b style='color:#444'>{s['tk']}</b> {s['dev5']:+.1f}% vs 5d "
-                       f"<span style='color:#aaa'>· 10d {r10s(s)}</span></div>" for s in below)
-        below_html = (f"<div style='margin-top:16px'><div style='font-size:11px;color:#999;"
-                      f"text-transform:uppercase;letter-spacing:.04em'>Below 5-day MA (not yet a buy)</div>"
-                      f"{rows}</div>")
-    return (f"<div style='font-family:-apple-system,sans-serif;max-width:480px;margin:auto;"
-            f"padding:8px;color:#222'>"
-            f"<div style='font-size:13px;color:#999'>{day}</div>"
-            f"<h2 style='margin:2px 0 12px;font-size:20px'>Today’s brief</h2>"
-            f"{todo}{prime_note}{below_html}"
-            f"<a href='{DASH_URL}' style='display:block;text-align:center;margin-top:18px;"
-            f"background:#238636;color:#fff;text-decoration:none;font-weight:600;font-size:15px;"
-            f"padding:12px;border-radius:8px'>📈 View live trends &amp; chart</a>"
-            f"<div style='font-size:11px;color:#aaa;margin-top:14px'>Buy fresh dip below 5-day MA, "
-            f"hold ~{REV_HOLD} trading days. Full 10-ETF chart at the link.</div></div>")
+# ---------------- email digest (one unified white theme) ----------------
+# Every section — ETF reversion, crypto reversion, microcap flow — shares the same
+# compact signal-row + section-header components so the email reads as a single
+# actionable brief on a white background, not mismatched cards. Inline styles only
+# (Gmail strips <style>); tables for layout (most email-client-robust).
+E_INK, E_MUT, E_FAINT, E_LINE = "#111827", "#6b7280", "#9aa1ab", "#eceef1"
+E_GRN, E_GRNBG, E_AMB, E_AMBBG = "#15803d", "#ecfdf5", "#b45309", "#fff7ed"
+E_SANS = "-apple-system,BlinkMacSystemFont,Helvetica,Arial,sans-serif"
+
+def _r10s(s):
+    v = s.get("r10")
+    return f"{v:+.0f}%" if v is not None and v == v else "—"
+
+def _fmt_px(p):
+    return f"${p:,.2f}" if p >= 1 else f"${p:.4f}"
+
+def _pill(text, fg, bg):
+    return (f"<span style='display:inline-block;font-size:10px;font-weight:700;letter-spacing:.05em;"
+            f"text-transform:uppercase;color:{fg};background:{bg};padding:3px 9px;border-radius:999px'>{text}</span>")
+
+def _signal_row(ticker, price, sub, pill, dot, last):
+    b = "" if last else f"border-bottom:1px solid {E_LINE};"
+    return (
+        "<tr>"
+        f"<td style='padding:12px 0;{b}vertical-align:top'>"
+        f"<span style='display:inline-block;width:7px;height:7px;border-radius:50%;background:{dot};"
+        f"margin-right:9px;vertical-align:middle'></span>"
+        f"<b style='font-size:16px;color:{E_INK};vertical-align:middle'>{ticker}</b>"
+        f"<div style='font-size:12px;color:{E_MUT};margin:4px 0 0 16px'>{sub}</div></td>"
+        f"<td align='right' style='padding:12px 0;{b}vertical-align:top;white-space:nowrap'>"
+        f"<div style='font-size:15px;font-weight:600;color:{E_INK}'>{price}</div>"
+        f"<div style='margin-top:6px'>{pill}</div></td>"
+        "</tr>")
+
+def _empty_row(text):
+    return f"<tr><td style='padding:12px 0;font-size:13px;color:{E_FAINT}'>{text}</td></tr>"
+
+def _section(label, count, rows, note=""):
+    note_html = (f"<div style='font-size:11px;color:{E_FAINT};margin:9px 2px 0;line-height:1.4'>{note}</div>"
+                 if note else "")
+    return (
+        f"<div style='margin-top:24px'>"
+        f"<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse;"
+        f"border-bottom:2px solid {E_INK}'><tr>"
+        f"<td style='padding-bottom:7px;font-size:11px;font-weight:700;letter-spacing:.09em;"
+        f"text-transform:uppercase;color:{E_INK}'>{label}</td>"
+        f"<td align='right' style='padding-bottom:7px;font-size:11px;color:{E_FAINT}'>{count}</td>"
+        f"</tr></table>"
+        f"<table width='100%' cellpadding='0' cellspacing='0' style='border-collapse:collapse'>{rows}</table>"
+        f"{note_html}</div>")
+
+def render_etf_section(buys):
+    if buys:
+        rows = "".join(_signal_row(
+            ("⭐ " if s.get("prime") else "") + s["tk"], f"${s['close']:.2f}",
+            f"{s['dev5']:+.1f}% vs 5-day · 10d {_r10s(s)} · {s.get('regime','')}",
+            _pill("Buy", E_GRN, E_GRNBG), E_GRN, i == len(buys) - 1) for i, s in enumerate(buys))
+        return _section("ETF reversion", f"{len(buys)} buy", rows,
+                        f"10 thematic ETFs · buy the dip, hold ~{REV_HOLD} days")
+    return _section("ETF reversion", "0", _empty_row("No buy signal today"))
 
 def render_microcap_section(rows):
-    """HTML block for the microcap flow watchlist inside the digest. `rows` is a
-    list of dicts from microcap_signals(). Experimental — labelled as such."""
+    """Microcap flow watchlist rows inside the digest — same white signal-row look
+    as the other sections. `rows` is a list of dicts from microcap_signals()."""
     if not rows:
-        return ("<div style='margin-top:18px'><div style='font-size:11px;color:#999;"
-                "text-transform:uppercase;letter-spacing:.04em'>Microcap flow watch (experimental)</div>"
-                "<div style='font-size:13px;color:#888;margin:4px 0'>· none today</div></div>")
-    cards = ""
-    for r in rows:
+        return _section("Microcap flow", "0", _empty_row("Nothing flagged today"))
+    rr = ""
+    for i, r in enumerate(rows):
         dte = int(r.get("dte") or 0)
-        horizon = "soon" if dte <= 45 else ("weeks out" if dte <= 90 else "months out")
-        cards += (f"<div style='background:#12261a;border:1px solid #238636;border-radius:8px;"
-                  f"padding:9px 11px;margin:6px 0'>"
-                  f"<div style='font-size:16px;font-weight:700;color:#238636'>🔎 {r['und']} "
-                  f"<span style='color:#222'>${r['close']:.2f}</span></div>"
-                  f"<div style='font-size:12px;color:#555;margin-top:2px'>${r['strike']:.1f} calls "
-                  f"exp {r.get('expiry','?')} ({dte}d — {horizon}) · {r['ks']:.2f}× spot</div>"
-                  f"<div style='font-size:12px;color:#555'>${r['call_notional']/1e3:.0f}k = "
-                  f"{r['x_base']:.0f}× baseline · {r['top_share']:.0%} one strike · puts {r['put_share']:.0%}</div>"
-                  f"<div style='font-size:11px;color:#888;margin-top:1px'>"
-                  f"{r['below_hi']:+.0%} vs 20d high · beaten-down + deep-OTM call buying</div></div>")
-    return ("<div style='margin-top:18px'><div style='font-size:11px;color:#999;"
-            "text-transform:uppercase;letter-spacing:.04em'>Microcap flow watch (experimental)</div>"
-            f"{cards}"
-            "<div style='font-size:10px;color:#aaa;margin-top:4px'>Unusual single-strike call buying "
-            "on beaten-down microcaps. ~9-day median lead; ~2/3 fizzle. Not advice — a watchlist.</div></div>")
+        horizon = "soon" if dte <= 45 else ("weeks" if dte <= 90 else "months")
+        sub = (f"${r['strike']:.1f} calls · exp {r.get('expiry','?')} ({dte}d, {horizon}) · "
+               f"{r['x_base']:.0f}× flow")
+        rr += _signal_row(r["und"], f"${r['close']:.2f}", sub, _pill("Flow", E_AMB, E_AMBBG),
+                          E_AMB, i == len(rows) - 1)
+    return _section("Microcap flow", f"{len(rows)}", rr,
+                    "Beaten-down microcaps · follow the call flow · ~9-day median lead")
 
 # ---------------- crypto 5-day-MA reversion (see crypto/reversion_crypto.py) ----------------
 # Same dip-buy model as the ETF board, on the top-20 liquid coins / hourly bars:
@@ -324,25 +334,14 @@ def crypto_board():
     return buys
 
 def render_crypto_section(buys):
-    """HTML block for the crypto 5-day-MA reversion buys inside the digest."""
+    """Crypto 5-day-MA reversion buys — same white signal-row look as the rest."""
     if not buys:
-        return ("<div style='margin-top:18px'><div style='font-size:11px;color:#999;"
-                "text-transform:uppercase;letter-spacing:.04em'>Crypto reversion — 5-day MA (experimental)</div>"
-                "<div style='font-size:13px;color:#888;margin:4px 0'>· no dip-buy signal today</div></div>")
-    cards = ""
-    for b in buys:
-        px = f"{b['price']:,.2f}" if b["price"] >= 1 else f"{b['price']:.4f}"
-        cards += (f"<div style='background:#12261a;border:1px solid #238636;border-radius:8px;"
-                  f"padding:9px 11px;margin:6px 0'>"
-                  f"<div style='font-size:16px;font-weight:700;color:#238636'>🟢 BUY {b['coin']} "
-                  f"<span style='color:#222'>${px}</span></div>"
-                  f"<div style='font-size:12px;color:#555;margin-top:2px'>{b['dev']:+.2f}% vs 5-day MA "
-                  f"(buy ≤ {b['thr']:.2f}%) · hold ~2 days</div></div>")
-    return ("<div style='margin-top:18px'><div style='font-size:11px;color:#999;"
-            "text-transform:uppercase;letter-spacing:.04em'>Crypto reversion — 5-day MA (experimental)</div>"
-            f"{cards}"
-            "<div style='font-size:10px;color:#aaa;margin-top:4px'>Top-20 liquid coins. Buy a dip below "
-            "the 5-day MA, hold ~2 days. +1.4%/trade, 62% win on a 30-day test — not advice.</div></div>")
+        return _section("Crypto reversion", "0", _empty_row("No dip-buy signal today"))
+    rows = "".join(_signal_row(
+        b["coin"], _fmt_px(b["price"]), f"{b['dev']:+.2f}% vs 5-day MA (buy ≤ {b['thr']:.2f}%)",
+        _pill("Buy", E_GRN, E_GRNBG), E_GRN, i == len(buys) - 1) for i, b in enumerate(buys))
+    return _section("Crypto reversion", f"{len(buys)} buy", rows,
+                    "Top-20 liquid coins · buy the dip, hold ~2 days")
 
 def load_micro_signals():
     """Microcap signals from the blob the EOD job wrote. run_eod overwrites this
@@ -387,10 +386,22 @@ def send_brief(tag, force=False, micro=None):
             f"{len(crypto)} crypto / {len(states)} etf")
 
 def _digest_html(states, micro, crypto, day):
-    """ETF brief + microcap + crypto sections stitched into one mobile email."""
-    base = render_daily_brief(states, day)
-    inject = render_microcap_section(micro) + render_crypto_section(crypto) + "<a href"
-    return base.replace("<a href", inject, 1)   # insert the watch sections above the chart button
+    """One unified white-theme brief: header + at-a-glance counts, then ETF /
+    crypto / microcap sections, a below-MA watch, and a single CTA. Mobile-first."""
+    etf_buys = sorted([s for s in states if s.get("buy")], key=lambda x: x["dev5"])
+    n_buy = len(etf_buys) + len(crypto)
+    head = (f"<div style='font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:{E_FAINT}'>"
+            f"{day} · morning brief</div>"
+            f"<div style='font-family:Georgia,serif;font-size:27px;font-weight:700;color:{E_INK};"
+            f"margin-top:3px;letter-spacing:-.01em'>Dashboard</div>")
+    strip = (f"<div style='margin-top:16px;font-size:13px;color:{E_MUT}'>"
+             f"<b style='color:{E_GRN}'>{n_buy}</b> buy · "
+             f"<b style='color:{E_AMB}'>{len(micro)}</b> flow · "
+             f"<b style='color:{E_INK}'>{len(states)}</b> ETFs tracked</div>")
+    body = (head + strip + render_etf_section(etf_buys) + render_crypto_section(crypto)
+            + render_microcap_section(micro))
+    return (f"<div style='background:#ffffff;padding:26px 20px'>"
+            f"<div style='font-family:{E_SANS};max-width:468px;margin:0 auto;color:{E_INK}'>{body}</div></div>")
 
 # ---------------- intraday reversion ALIGNMENT (entry trigger) ----------------
 def reversion_board():
